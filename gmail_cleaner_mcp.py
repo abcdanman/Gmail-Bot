@@ -16,7 +16,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = ["https://mail.google.com/"]
 TOKEN_FILE = Path(__file__).parent / "token.pickle"
 CREDENTIALS_FILE = Path(__file__).parent / "credentials.json"
 
@@ -74,6 +74,42 @@ def _get_message_details(service, msg_id: str) -> dict:
         "labels": msg.get("labelIds", []),
         "snippet": msg.get("snippet", ""),
     }
+
+
+def _batch_get_message_details(service, message_ids: list[str]) -> list[dict]:
+    """Fetch details for multiple messages using batch HTTP requests (100 per batch)."""
+    results = []
+    for i in range(0, len(message_ids), 100):
+        chunk = message_ids[i:i + 100]
+        batch = service.new_batch_http_request()
+        chunk_results = {}
+
+        def make_callback(mid):
+            def callback(request_id, response, exception):
+                if exception is None and response:
+                    headers = {h["name"]: h["value"] for h in response.get("payload", {}).get("headers", [])}
+                    chunk_results[mid] = {
+                        "id": mid,
+                        "subject": headers.get("Subject", "(no subject)"),
+                        "from": headers.get("From", ""),
+                        "date": headers.get("Date", ""),
+                        "size": response.get("sizeEstimate", 0),
+                        "labels": response.get("labelIds", []),
+                        "snippet": response.get("snippet", ""),
+                    }
+            return callback
+
+        for mid in chunk:
+            batch.add(
+                service.users().messages().get(
+                    userId="me", id=mid, format="metadata",
+                    metadataHeaders=["Subject", "From", "Date"]
+                ),
+                callback=make_callback(mid)
+            )
+        batch.execute()
+        results.extend(chunk_results.get(mid, {"id": mid, "subject": "", "from": "", "date": "", "size": 0, "labels": [], "snippet": ""}) for mid in chunk)
+    return results
 
 
 def _batch_delete(service, message_ids: list[str]) -> int:
@@ -353,13 +389,15 @@ def _find_duplicates(service, max_results: int = 500, folder: str = "INBOX") -> 
     if not messages:
         return "No messages found."
 
+    ids = [m["id"] for m in messages]
+    details = _batch_get_message_details(service, ids)
+
     seen: dict[str, list[str]] = {}
-    for m in messages:
-        d = _get_message_details(service, m["id"])
+    for d in details:
         key = f"{d['from'].lower()}|||{d['subject'].lower().strip()}"
         if key not in seen:
             seen[key] = []
-        seen[key].append(m["id"])
+        seen[key].append(d["id"])
 
     duplicates = {k: v for k, v in seen.items() if len(v) > 1}
     if not duplicates:
@@ -468,15 +506,17 @@ def _delete_duplicate_emails(service, max_results: int = 500, folder: str = "INB
     if not messages:
         return "No messages found."
 
+    ids = [m["id"] for m in messages]
+    details = _batch_get_message_details(service, ids)
+
     seen: dict[str, str] = {}
     to_delete = []
-    for m in messages:
-        d = _get_message_details(service, m["id"])
+    for d in details:
         key = f"{d['from'].lower()}|||{d['subject'].lower().strip()}"
         if key in seen:
-            to_delete.append(m["id"])
+            to_delete.append(d["id"])
         else:
-            seen[key] = m["id"]
+            seen[key] = d["id"]
 
     if not to_delete:
         return f"No duplicate emails found in {folder}."

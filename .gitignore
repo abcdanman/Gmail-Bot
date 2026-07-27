@@ -1,12 +1,15 @@
 # Google OAuth credentials - NEVER commit these
 credentials.json
 token.pickle
+token.json
+client_secret*.json
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .env
+.env.*
 
 # VS Code
 .vscode/
